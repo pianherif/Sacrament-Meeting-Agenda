@@ -1359,7 +1359,7 @@ function Divider() {
 }
 
 function DetailRow({ label, value }) {
-  if (!value) return null;
+  if (value === null || value === undefined || value === "") return null;
   return (
     <p className="text-sm mb-1.5">
       <span className="text-[#5C6470] font-mono text-xs uppercase tracking-wider mr-2">{label}</span>
