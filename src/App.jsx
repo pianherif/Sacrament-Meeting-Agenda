@@ -130,6 +130,8 @@ export default function App() {
   const [authRole, setAuthRole] = useState(ROLES[0]);
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+  const [needsProfile, setNeedsProfile] = useState(false);
+  const [pendingAuth, setPendingAuth] = useState(null);
 
   // Stake/unit selection for signup
   const [stakes, setStakes] = useState([]);
@@ -155,9 +157,10 @@ export default function App() {
 
   // Load stakes for signup dropdown (public read, no auth needed)
   useEffect(() => {
-    if (!CONFIGURED || authMode !== "signup" || session) return;
+    if (!CONFIGURED || session) return;
+    if (authMode !== "signup" && !needsProfile) return;
     sbRest("stakes?select=*&status=eq.approved&order=name").then(setStakes).catch(() => {});
-  }, [authMode, session]);
+  }, [authMode, needsProfile, session]);
 
   // Load units when a stake is picked
   useEffect(() => {
@@ -216,6 +219,70 @@ export default function App() {
     }
   }
 
+  async function finishAccountSetup(token, userId) {
+    const usingNewStake = stakeChoice === NEW_STAKE_VALUE;
+    const usingNewUnit = unitChoice === NEW_UNIT_VALUE;
+    const isStakeAdmin = authRole === "Stake Admin";
+
+    let stakeId = stakeChoice;
+    if (usingNewStake) {
+      const [newStake] = await sbRest("stakes", {
+        method: "POST",
+        token,
+        body: { name: newStakeName.trim(), status: "pending", requested_by: userId },
+      });
+      stakeId = newStake.id;
+    }
+
+    let unitId = null;
+    if (!isStakeAdmin) {
+      unitId = unitChoice;
+      if (usingNewUnit) {
+        const [newUnit] = await sbRest("units", {
+          method: "POST",
+          token,
+          body: { stake_id: stakeId, name: newUnitName.trim(), abbreviation: newUnitAbbr.trim() || null, status: "pending", requested_by: userId },
+        });
+        unitId = newUnit.id;
+      }
+    }
+
+    await sbRest("profiles", {
+      method: "POST",
+      token,
+      body: { id: userId, full_name: authName, role: authRole, unit_id: unitId, stake_id: isStakeAdmin ? stakeId : null, status: "pending" },
+    });
+
+    const isAdmin = await checkIsAdmin(token, userId);
+
+    setSession({
+      token,
+      userId,
+      name: authName,
+      role: authRole,
+      unitId,
+      unitName: isStakeAdmin ? "All units" : (usingNewUnit ? newUnitName.trim() : units.find((u) => String(u.id) === String(unitId))?.name || ""),
+      stakeName: usingNewStake ? newStakeName.trim() : stakes.find((s) => String(s.id) === String(stakeId))?.name || "",
+      pending: true,
+      isAdmin,
+    });
+    setNeedsProfile(false);
+  }
+
+  function validateProfileFields() {
+    const usingNewStake = stakeChoice === NEW_STAKE_VALUE;
+    const usingNewUnit = unitChoice === NEW_UNIT_VALUE;
+    const isStakeAdmin = authRole === "Stake Admin";
+    if (!authName.trim()) return "Enter your full name.";
+    if (usingNewStake && !newStakeName.trim()) return "Enter a name for the new stake.";
+    if (!usingNewStake && !stakeChoice) return "Choose a stake.";
+    if (!isStakeAdmin) {
+      if (usingNewUnit && !newUnitName.trim()) return "Enter a name for the new unit.";
+      if (!usingNewUnit && !unitChoice) return "Choose a unit.";
+    }
+    return null;
+  }
+
   async function handleSignIn(e) {
     e.preventDefault();
     setAuthError("");
@@ -224,7 +291,14 @@ export default function App() {
       const data = await sbAuth("token?grant_type=password", { email: authEmail, password: authPassword });
       const profileRows = await sbRest(`profiles?id=eq.${data.user.id}&select=*`, { token: data.access_token });
       const p = profileRows[0];
-      if (!p) throw new Error("Profile not found for this account.");
+
+      if (!p) {
+        // Valid login, but no profile — access may have been removed previously.
+        // Let them set up a new profile instead of showing a dead-end error.
+        setPendingAuth({ token: data.access_token, userId: data.user.id });
+        setNeedsProfile(true);
+        return;
+      }
 
       let unitName = "All units";
       let stakeName = "";
@@ -261,19 +335,27 @@ export default function App() {
     }
   }
 
+  async function handleCompleteProfile(e) {
+    e.preventDefault();
+    setAuthError("");
+    const validationError = validateProfileFields();
+    if (validationError) return setAuthError(validationError);
+
+    setAuthLoading(true);
+    try {
+      await finishAccountSetup(pendingAuth.token, pendingAuth.userId);
+    } catch (e) {
+      setAuthError(e.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
   async function handleSignUp(e) {
     e.preventDefault();
     setAuthError("");
-
-    const usingNewStake = stakeChoice === NEW_STAKE_VALUE;
-    const usingNewUnit = unitChoice === NEW_UNIT_VALUE;
-    const isStakeAdmin = authRole === "Stake Admin";
-    if (usingNewStake && !newStakeName.trim()) return setAuthError("Enter a name for the new stake.");
-    if (!usingNewStake && !stakeChoice) return setAuthError("Choose a stake.");
-    if (!isStakeAdmin) {
-      if (usingNewUnit && !newUnitName.trim()) return setAuthError("Enter a name for the new unit.");
-      if (!usingNewUnit && !unitChoice) return setAuthError("Choose a unit.");
-    }
+    const validationError = validateProfileFields();
+    if (validationError) return setAuthError(validationError);
 
     setAuthLoading(true);
     try {
@@ -283,54 +365,7 @@ export default function App() {
         setAuthMode("signin");
         return;
       }
-      const token = data.access_token;
-
-      let stakeId = stakeChoice;
-      let stakePending = false;
-      if (usingNewStake) {
-        const [newStake] = await sbRest("stakes", {
-          method: "POST",
-          token,
-          body: { name: newStakeName.trim(), status: "pending", requested_by: data.user.id },
-        });
-        stakeId = newStake.id;
-        stakePending = true;
-      }
-
-      let unitId = null;
-      let unitPending = false;
-      if (!isStakeAdmin) {
-        unitId = unitChoice;
-        if (usingNewUnit) {
-          const [newUnit] = await sbRest("units", {
-            method: "POST",
-            token,
-            body: { stake_id: stakeId, name: newUnitName.trim(), abbreviation: newUnitAbbr.trim() || null, status: "pending", requested_by: data.user.id },
-          });
-          unitId = newUnit.id;
-          unitPending = true;
-        }
-      }
-
-      await sbRest("profiles", {
-        method: "POST",
-        token,
-        body: { id: data.user.id, full_name: authName, role: authRole, unit_id: unitId, stake_id: isStakeAdmin ? stakeId : null, status: "pending" },
-      });
-
-      const isAdmin = await checkIsAdmin(token, data.user.id);
-
-      setSession({
-        token,
-        userId: data.user.id,
-        name: authName,
-        role: authRole,
-        unitId,
-        unitName: isStakeAdmin ? "All units" : (usingNewUnit ? newUnitName.trim() : units.find((u) => String(u.id) === String(unitId))?.name || ""),
-        stakeName: usingNewStake ? newStakeName.trim() : stakes.find((s) => String(s.id) === String(stakeId))?.name || "",
-        pending: true,
-        isAdmin,
-      });
+      await finishAccountSetup(data.access_token, data.user.id);
     } catch (e) {
       setAuthError(e.message);
     } finally {
@@ -423,6 +458,89 @@ export default function App() {
             Set <code className="bg-[#EFEBE1] px-1">SUPABASE_URL</code> and{" "}
             <code className="bg-[#EFEBE1] px-1">SUPABASE_ANON_KEY</code> at the top of this file.
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (needsProfile) {
+    return (
+      <div className="min-h-screen bg-[#14213D] flex items-center justify-center p-6">
+        <div className="w-full max-w-sm">
+          <div className="flex flex-col items-center mb-8">
+            <div className="w-14 h-14 rounded-full bg-[#B08D57] flex items-center justify-center mb-4">
+              <BookOpen className="w-7 h-7 text-[#14213D]" />
+            </div>
+            <h1 className="text-2xl font-serif text-[#FAF8F3] tracking-wide">Set Up Your Profile</h1>
+            <p className="text-[#8B96A8] text-sm mt-1 font-mono text-center">
+              Your login works, but there's no profile linked to it yet.
+            </p>
+          </div>
+
+          <form onSubmit={handleCompleteProfile} className="bg-[#FAF8F3] rounded-sm p-7 shadow-2xl border-t-4 border-[#B08D57]">
+            <Field label="Full Name">
+              <input value={authName} onChange={(e) => setAuthName(e.target.value)} className={inputClass} required />
+            </Field>
+            <Field label="Role">
+              <select value={authRole} onChange={(e) => setAuthRole(e.target.value)} className={inputClass}>
+                {ROLES.map((r) => <option key={r}>{r}</option>)}
+              </select>
+            </Field>
+
+            <Field label="Stake">
+              <select value={stakeChoice} onChange={(e) => { setStakeChoice(e.target.value); setUnitChoice(""); }} className={inputClass}>
+                <option value="">Select a stake…</option>
+                {stakes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                <option value={NEW_STAKE_VALUE}>+ Create new stake</option>
+              </select>
+            </Field>
+            {stakeChoice === NEW_STAKE_VALUE && (
+              <Field label="New Stake Name">
+                <input value={newStakeName} onChange={(e) => setNewStakeName(e.target.value)} className={inputClass} />
+              </Field>
+            )}
+
+            {stakeChoice && authRole !== "Stake Admin" && (
+              <>
+                <Field label="Unit (Ward/Branch)">
+                  <select value={unitChoice} onChange={(e) => setUnitChoice(e.target.value)} className={inputClass}>
+                    <option value="">Select a unit…</option>
+                    {units.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                    <option value={NEW_UNIT_VALUE}>+ Create new unit</option>
+                  </select>
+                </Field>
+                {unitChoice === NEW_UNIT_VALUE && (
+                  <>
+                    <Field label="New Unit Name">
+                      <input value={newUnitName} onChange={(e) => setNewUnitName(e.target.value)} className={inputClass} />
+                    </Field>
+                    <Field label="Abbreviation (optional, shown in the minutes index)">
+                      <input value={newUnitAbbr} onChange={(e) => setNewUnitAbbr(e.target.value)} className={inputClass} placeholder="e.g. Elm Park" maxLength={12} />
+                    </Field>
+                  </>
+                )}
+              </>
+            )}
+            {stakeChoice && authRole === "Stake Admin" && (
+              <p className="text-xs text-[#5C6470] mb-4 italic">
+                Stake Admin isn't tied to a specific unit — you'll see records across the whole stake.
+              </p>
+            )}
+
+            {authError && <p className="text-[#B0473C] text-xs mb-3">{authError}</p>}
+
+            <button type="submit" disabled={authLoading} className="w-full bg-[#14213D] text-[#FAF8F3] rounded-sm py-2.5 font-medium flex items-center justify-center gap-2 hover:bg-[#1d2f52] transition-colors disabled:opacity-60 mt-1">
+              {authLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
+              Continue
+            </button>
+            <button
+              type="button"
+              onClick={() => { setNeedsProfile(false); setPendingAuth(null); setAuthError(""); }}
+              className="w-full text-center text-xs text-[#5C6470] mt-3"
+            >
+              Cancel and sign out
+            </button>
+          </form>
         </div>
       </div>
     );
