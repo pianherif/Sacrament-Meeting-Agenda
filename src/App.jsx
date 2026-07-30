@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { BookOpen, LogIn, UserPlus, Plus, X, Stamp, Users, ChevronLeft, FileText, Trash2, Loader2, AlertTriangle, Download, Mic } from "lucide-react";
+import { BookOpen, LogIn, UserPlus, Plus, X, Stamp, Users, ChevronLeft, FileText, Trash2, Loader2, AlertTriangle, Download, Mic, ShieldCheck, Check, Settings } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // 1) Create a free project at supabase.com
@@ -19,6 +19,7 @@ const emptyRecord = () => ({
   meetingDate: "",
   presiding: "",
   conducting: "",
+  acknowledgments: "",
   attendance: "",
   openingHymn: "",
   openingPrayer: "",
@@ -77,6 +78,7 @@ function toDbRow(d, userId, unitId) {
     meeting_date: d.meetingDate,
     presiding: d.presiding,
     conducting: d.conducting,
+    acknowledgments: d.acknowledgments,
     attendance: d.attendance ? Number(d.attendance) : null,
     opening_hymn: d.openingHymn,
     opening_prayer: d.openingPrayer,
@@ -97,9 +99,11 @@ function toDbRow(d, userId, unitId) {
 function fromDbRow(row) {
   return {
     id: row.id,
+    unitId: row.unit_id,
     meetingDate: row.meeting_date,
     presiding: row.presiding,
     conducting: row.conducting,
+    acknowledgments: row.acknowledgments,
     attendance: row.attendance,
     openingHymn: row.opening_hymn,
     openingPrayer: row.opening_prayer,
@@ -134,13 +138,16 @@ export default function App() {
   const [newStakeName, setNewStakeName] = useState("");
   const [unitChoice, setUnitChoice] = useState("");
   const [newUnitName, setNewUnitName] = useState("");
+  const [newUnitAbbr, setNewUnitAbbr] = useState("");
 
   const [records, setRecords] = useState([]);
   const [loadingRecords, setLoadingRecords] = useState(false);
+  const [unitsById, setUnitsById] = useState({});
   const [speakerRows, setSpeakerRows] = useState([]);
   const [loadingSpeakers, setLoadingSpeakers] = useState(false);
   const [view, setView] = useState("list");
   const [draft, setDraft] = useState(emptyRecord());
+  const [editingId, setEditingId] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -148,7 +155,7 @@ export default function App() {
   // Load stakes for signup dropdown (public read, no auth needed)
   useEffect(() => {
     if (!CONFIGURED || authMode !== "signup" || session) return;
-    sbRest("stakes?select=*&order=name").then(setStakes).catch(() => {});
+    sbRest("stakes?select=*&status=eq.approved&order=name").then(setStakes).catch(() => {});
   }, [authMode, session]);
 
   // Load units when a stake is picked
@@ -157,7 +164,7 @@ export default function App() {
       setUnits([]);
       return;
     }
-    sbRest(`units?stake_id=eq.${stakeChoice}&select=*&order=name`).then(setUnits).catch(() => {});
+    sbRest(`units?stake_id=eq.${stakeChoice}&status=eq.approved&select=*&order=name`).then(setUnits).catch(() => {});
   }, [stakeChoice]);
 
   const loadRecords = useCallback(async (token) => {
@@ -165,6 +172,13 @@ export default function App() {
     try {
       const rows = await sbRest("minutes?select=*&order=meeting_date.desc", { token });
       setRecords(rows.map(fromDbRow));
+      const unitIds = Array.from(new Set(rows.map((r) => r.unit_id).filter(Boolean)));
+      if (unitIds.length) {
+        const unitRows = await sbRest(`units?id=in.(${unitIds.join(",")})&select=id,name,abbreviation`, { token });
+        const map = {};
+        unitRows.forEach((u) => { map[u.id] = u; });
+        setUnitsById(map);
+      }
     } catch (e) {
       setSaveError(e.message);
     } finally {
@@ -191,6 +205,15 @@ export default function App() {
     }
   }, [session, loadRecords, loadSpeakerHistory]);
 
+  async function checkIsAdmin(token, userId) {
+    try {
+      const rows = await sbRest(`platform_admins?id=eq.${userId}&select=id`, { token });
+      return rows.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   async function handleSignIn(e) {
     e.preventDefault();
     setAuthError("");
@@ -203,15 +226,20 @@ export default function App() {
 
       let unitName = "All units";
       let stakeName = "";
+      let pending = false;
       if (p.unit_id) {
         const unitRows = await sbRest(`units?id=eq.${p.unit_id}&select=*,stakes(name)`, { token: data.access_token });
         const unit = unitRows[0] || {};
         unitName = unit.name || "";
         stakeName = unit.stakes?.name || "";
+        pending = unit.status !== "approved";
       } else if (p.stake_id) {
         const stakeRows = await sbRest(`stakes?id=eq.${p.stake_id}&select=*`, { token: data.access_token });
         stakeName = stakeRows[0]?.name || "";
+        pending = stakeRows[0]?.status !== "approved";
       }
+
+      const isAdmin = await checkIsAdmin(data.access_token, data.user.id);
 
       setSession({
         token: data.access_token,
@@ -221,6 +249,8 @@ export default function App() {
         unitId: p.unit_id,
         unitName,
         stakeName,
+        pending,
+        isAdmin,
       });
     } catch (e) {
       setAuthError(e.message);
@@ -254,21 +284,29 @@ export default function App() {
       const token = data.access_token;
 
       let stakeId = stakeChoice;
+      let stakePending = false;
       if (usingNewStake) {
-        const [newStake] = await sbRest("stakes", { method: "POST", token, body: { name: newStakeName.trim() } });
+        const [newStake] = await sbRest("stakes", {
+          method: "POST",
+          token,
+          body: { name: newStakeName.trim(), status: "pending", requested_by: data.user.id },
+        });
         stakeId = newStake.id;
+        stakePending = true;
       }
 
       let unitId = null;
+      let unitPending = false;
       if (!isStakeAdmin) {
         unitId = unitChoice;
         if (usingNewUnit) {
           const [newUnit] = await sbRest("units", {
             method: "POST",
             token,
-            body: { stake_id: stakeId, name: newUnitName.trim() },
+            body: { stake_id: stakeId, name: newUnitName.trim(), abbreviation: newUnitAbbr.trim() || null, status: "pending", requested_by: data.user.id },
           });
           unitId = newUnit.id;
+          unitPending = true;
         }
       }
 
@@ -278,6 +316,8 @@ export default function App() {
         body: { id: data.user.id, full_name: authName, role: authRole, unit_id: unitId, stake_id: isStakeAdmin ? stakeId : null },
       });
 
+      const isAdmin = await checkIsAdmin(token, data.user.id);
+
       setSession({
         token,
         userId: data.user.id,
@@ -286,6 +326,8 @@ export default function App() {
         unitId,
         unitName: isStakeAdmin ? "All units" : (usingNewUnit ? newUnitName.trim() : units.find((u) => String(u.id) === String(unitId))?.name || ""),
         stakeName: usingNewStake ? newStakeName.trim() : stakes.find((s) => String(s.id) === String(stakeId))?.name || "",
+        pending: isStakeAdmin ? stakePending : (unitPending || stakePending),
+        isAdmin,
       });
     } catch (e) {
       setAuthError(e.message);
@@ -296,6 +338,14 @@ export default function App() {
 
   function startNew() {
     setDraft(emptyRecord());
+    setEditingId(null);
+    setSaveError("");
+    setView("form");
+  }
+
+  function startEdit(record) {
+    setDraft({ ...emptyRecord(), ...record });
+    setEditingId(record.id);
     setSaveError("");
     setView("form");
   }
@@ -325,10 +375,15 @@ export default function App() {
     setSaving(true);
     setSaveError("");
     try {
-      await sbRest("minutes", { method: "POST", token: session.token, body: toDbRow(draft, session.userId, session.unitId) });
+      if (editingId) {
+        await sbRest(`minutes?id=eq.${editingId}`, { method: "PATCH", token: session.token, body: toDbRow(draft, session.userId, session.unitId) });
+      } else {
+        await sbRest("minutes", { method: "POST", token: session.token, body: toDbRow(draft, session.userId, session.unitId) });
+      }
       await loadRecords(session.token);
       await loadSpeakerHistory(session.token);
-      setView("list");
+      setEditingId(null);
+      setView(editingId ? "detail" : "list");
     } catch (e) {
       setSaveError(e.message);
     } finally {
@@ -352,6 +407,7 @@ export default function App() {
   }
 
   const selected = records.find((r) => r.id === selectedId);
+  const speakerNameOptions = Array.from(new Set(speakerRows.map((r) => r.speaker_name).filter(Boolean))).sort();
 
   if (!CONFIGURED) {
     return (
@@ -433,9 +489,14 @@ export default function App() {
                       </select>
                     </Field>
                     {unitChoice === NEW_UNIT_VALUE && (
-                      <Field label="New Unit Name">
-                        <input value={newUnitName} onChange={(e) => setNewUnitName(e.target.value)} className={inputClass} />
-                      </Field>
+                      <>
+                        <Field label="New Unit Name">
+                          <input value={newUnitName} onChange={(e) => setNewUnitName(e.target.value)} className={inputClass} />
+                        </Field>
+                        <Field label="Abbreviation (optional, shown in the minutes index)">
+                          <input value={newUnitAbbr} onChange={(e) => setNewUnitAbbr(e.target.value)} className={inputClass} placeholder="e.g. Elm Park" maxLength={12} />
+                        </Field>
+                      </>
                     )}
                   </>
                 )}
@@ -466,6 +527,21 @@ export default function App() {
     );
   }
 
+  if (session.pending && !session.isAdmin) {
+    return (
+      <div className="min-h-screen bg-[#14213D] flex items-center justify-center p-6">
+        <div className="max-w-md bg-[#FAF8F3] rounded-sm p-7 border-t-4 border-[#B08D57] text-center">
+          <BookOpen className="w-8 h-8 text-[#B08D57] mx-auto mb-3" />
+          <h1 className="font-serif text-lg text-[#14213D] mb-2">Awaiting approval</h1>
+          <p className="text-sm text-[#5C6470] mb-1">
+            Your stake or unit ({session.unitName || session.stakeName}) was just created and is waiting for approval from the record book administrator.
+          </p>
+          <p className="text-sm text-[#5C6470]">You'll be able to record minutes as soon as it's approved.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#EFEBE1] flex flex-col md:flex-row font-sans">
       <aside className="md:w-72 bg-[#14213D] text-[#FAF8F3] flex flex-col shrink-0">
@@ -483,24 +559,44 @@ export default function App() {
         </button>
         <button
           onClick={() => setView("speakers")}
-          className={`mx-5 mb-4 rounded-sm py-2 font-medium flex items-center justify-center gap-2 border transition-colors ${view === "speakers" ? "bg-[#2A3B5C] border-[#2A3B5C]" : "border-[#2A3B5C] hover:bg-[#1d2f52]"}`}
+          className={`mx-5 mb-2 rounded-sm py-2 font-medium flex items-center justify-center gap-2 border transition-colors ${view === "speakers" ? "bg-[#2A3B5C] border-[#2A3B5C]" : "border-[#2A3B5C] hover:bg-[#1d2f52]"}`}
         >
           <Mic className="w-4 h-4" /> Speakers
         </button>
+        {session.isAdmin && (
+          <button
+            onClick={() => setView("approvals")}
+            className={`mx-5 mb-2 rounded-sm py-2 font-medium flex items-center justify-center gap-2 border transition-colors ${view === "approvals" ? "bg-[#2A3B5C] border-[#2A3B5C]" : "border-[#2A3B5C] hover:bg-[#1d2f52]"}`}
+          >
+            <ShieldCheck className="w-4 h-4" /> Approvals
+          </button>
+        )}
+        {(session.isAdmin || session.role === "Stake Admin") && (
+          <button
+            onClick={() => setView("manage")}
+            className={`mx-5 mb-4 rounded-sm py-2 font-medium flex items-center justify-center gap-2 border transition-colors ${view === "manage" ? "bg-[#2A3B5C] border-[#2A3B5C]" : "border-[#2A3B5C] hover:bg-[#1d2f52]"}`}
+          >
+            <Settings className="w-4 h-4" /> Manage
+          </button>
+        )}
 
         <div className="px-5 mt-2 mb-2 text-xs font-mono uppercase tracking-wider text-[#5C6470]">Index ({records.length})</div>
         <div className="flex-1 overflow-y-auto px-3 pb-6">
           {loadingRecords && <Loader2 className="w-4 h-4 animate-spin text-[#5C6470] mx-auto mt-2" />}
           {!loadingRecords && records.length === 0 && <p className="text-[#5C6470] text-sm px-2 mt-2 italic">No records yet. Create the first entry.</p>}
-          {records.map((r) => (
-            <button key={r.id} onClick={() => openDetail(r.id)} className={`w-full text-left px-3 py-2.5 rounded-sm mb-1 transition-colors ${selectedId === r.id && view === "detail" ? "bg-[#2A3B5C]" : "hover:bg-[#1d2f52]"}`}>
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-xs text-[#B08D57]">{recordNumber(r.id)}</span>
-                <FileText className="w-3.5 h-3.5 text-[#5C6470]" />
-              </div>
-              <div className="text-sm mt-0.5">{r.meetingDate || "Undated"}</div>
-            </button>
-          ))}
+          {records.map((r) => {
+            const u = unitsById[r.unitId];
+            const unitLabel = u ? (u.abbreviation || u.name) : null;
+            return (
+              <button key={r.id} onClick={() => openDetail(r.id)} className={`w-full text-left px-3 py-2.5 rounded-sm mb-1 transition-colors ${selectedId === r.id && view === "detail" ? "bg-[#2A3B5C]" : "hover:bg-[#1d2f52]"}`}>
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-xs text-[#B08D57]">{recordNumber(r.id)}</span>
+                  <FileText className="w-3.5 h-3.5 text-[#5C6470]" />
+                </div>
+                <div className="text-sm mt-0.5">{r.meetingDate || "Undated"}{unitLabel ? ` · ${unitLabel}` : ""}</div>
+              </button>
+            );
+          })}
         </div>
       </aside>
 
@@ -517,9 +613,13 @@ export default function App() {
           </div>
         )}
 
-        {view === "detail" && selected && <RecordDetail record={selected} onBack={() => setView("list")} onDelete={deleteRecord} />}
+        {view === "detail" && selected && <RecordDetail record={selected} unitLabel={unitsById[selected.unitId] ? (unitsById[selected.unitId].abbreviation || unitsById[selected.unitId].name) : null} onBack={() => setView("list")} onDelete={deleteRecord} onEdit={() => startEdit(selected)} />}
 
         {view === "speakers" && <SpeakersView rows={speakerRows} loading={loadingSpeakers} onBack={() => setView("list")} />}
+
+        {view === "approvals" && <ApprovalsView token={session.token} onBack={() => setView("list")} />}
+
+        {view === "manage" && <ManageView token={session.token} isAdmin={session.isAdmin} currentUserId={session.userId} onBack={() => setView("list")} />}
 
         {view === "form" && (
           <MinutesForm
@@ -528,9 +628,11 @@ export default function App() {
             updateListItem={updateListItem}
             addListItem={addListItem}
             removeListItem={removeListItem}
-            onCancel={() => setView("list")}
+            onCancel={() => setView(editingId ? "detail" : "list")}
             onSave={saveRecord}
             saving={saving}
+            isEditing={!!editingId}
+            speakerNames={speakerNameOptions}
           />
         )}
       </main>
@@ -549,10 +651,14 @@ function Field({ label, children }) {
 
 const inputClass = "w-full border border-[#D8D3C7] rounded-sm px-3 py-2 bg-white text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#B08D57] focus:border-transparent text-sm";
 
-function MinutesForm({ draft, updateField, updateListItem, addListItem, removeListItem, onCancel, onSave, saving }) {
+function MinutesForm({ draft, updateField, updateListItem, addListItem, removeListItem, onCancel, onSave, saving, isEditing, speakerNames }) {
   return (
     <form onSubmit={onSave} className="max-w-3xl">
-      <h2 className="font-serif text-2xl text-[#14213D] mb-6">New Sacrament Meeting Minutes</h2>
+      <h2 className="font-serif text-2xl text-[#14213D] mb-6">{isEditing ? "Edit Sacrament Meeting Minutes" : "New Sacrament Meeting Minutes"}</h2>
+
+      <datalist id="speaker-names-list">
+        {speakerNames.map((n) => <option key={n} value={n} />)}
+      </datalist>
 
       <Section title="General">
         <div className="grid sm:grid-cols-2 gap-x-4">
@@ -569,6 +675,9 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
             <input value={draft.conducting} onChange={(e) => updateField("conducting", e.target.value)} className={inputClass} />
           </Field>
         </div>
+        <Field label="Acknowledgments (pianist, chorister, other leaders)">
+          <input value={draft.acknowledgments} onChange={(e) => updateField("acknowledgments", e.target.value)} className={inputClass} placeholder="e.g. Pianist: Jane Doe · Chorister: John Smith" />
+        </Field>
       </Section>
 
       <Section title="Opening">
@@ -612,7 +721,13 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
             </select>
           </div>
         )}
-      />
+      >
+        <div className="bg-[#EFEBE1] border border-[#D8D3C7] rounded-sm p-4 mb-4 text-sm text-[#5C6470]">
+          <p className="font-mono text-xs uppercase tracking-wider text-[#5C6470] mb-2">Suggested script</p>
+          <p className="mb-1.5"><strong>Sustaining:</strong> "It is proposed that we sustain [name] as [calling]. All in favor, please manifest it. Those opposed, if any, may manifest it by the same sign."</p>
+          <p><strong>Releasing:</strong> "It is proposed that we release [name] as [calling], with a vote of thanks for the service rendered. All in favor, please manifest it."</p>
+        </div>
+      </RepeatingSection>
 
       <Section title="Sacrament">
         <Field label="Sacrament Hymn"><input value={draft.sacramentHymn} onChange={(e) => updateField("sacramentHymn", e.target.value)} className={inputClass} /></Field>
@@ -625,7 +740,7 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
         onRemove={(i) => removeListItem("speakersPart1", i)}
         renderItem={(item, i) => (
           <div className="grid sm:grid-cols-2 gap-3 flex-1">
-            <input value={item.name} onChange={(e) => updateListItem("speakersPart1", i, "name", e.target.value)} placeholder="Speaker name" className={inputClass} />
+            <input value={item.name} onChange={(e) => updateListItem("speakersPart1", i, "name", e.target.value)} placeholder="Speaker name" list="speaker-names-list" className={inputClass} />
             <input value={item.topic} onChange={(e) => updateListItem("speakersPart1", i, "topic", e.target.value)} placeholder="Topic" className={inputClass} />
           </div>
         )}
@@ -642,7 +757,7 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
         onRemove={(i) => removeListItem("speakersPart2", i)}
         renderItem={(item, i) => (
           <div className="grid sm:grid-cols-2 gap-3 flex-1">
-            <input value={item.name} onChange={(e) => updateListItem("speakersPart2", i, "name", e.target.value)} placeholder="Speaker name" className={inputClass} />
+            <input value={item.name} onChange={(e) => updateListItem("speakersPart2", i, "name", e.target.value)} placeholder="Speaker name" list="speaker-names-list" className={inputClass} />
             <input value={item.topic} onChange={(e) => updateListItem("speakersPart2", i, "topic", e.target.value)} placeholder="Topic" className={inputClass} />
           </div>
         )}
@@ -662,7 +777,7 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
       <div className="flex gap-3 pb-10">
         <button type="submit" disabled={saving} className="bg-[#14213D] text-[#FAF8F3] rounded-sm px-6 py-3 font-medium hover:bg-[#1d2f52] transition-colors disabled:opacity-60 flex items-center gap-2">
           {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-          Save Minutes
+          {isEditing ? "Save Changes" : "Save Minutes"}
         </button>
         <button type="button" onClick={onCancel} className="bg-transparent text-[#5C6470] rounded-sm px-6 py-3 font-medium border border-[#D8D3C7] hover:bg-white transition-colors">Cancel</button>
       </div>
@@ -679,7 +794,7 @@ function Section({ title, children }) {
   );
 }
 
-function RepeatingSection({ title, items, onAdd, onRemove, renderItem }) {
+function RepeatingSection({ title, items, onAdd, onRemove, renderItem, children }) {
   return (
     <section className="bg-white rounded-sm border border-[#E3DECF] p-6 mb-5">
       <div className="flex items-center justify-between border-b border-[#E3DECF] pb-2 mb-4">
@@ -688,6 +803,7 @@ function RepeatingSection({ title, items, onAdd, onRemove, renderItem }) {
           <Plus className="w-4 h-4" /> Add
         </button>
       </div>
+      {children}
       {items.map((item, i) => (
         <div key={i} className="flex items-start gap-2 mb-3">
           {renderItem(item, i)}
@@ -702,7 +818,7 @@ function RepeatingSection({ title, items, onAdd, onRemove, renderItem }) {
   );
 }
 
-function RecordDetail({ record, onBack, onDelete }) {
+function RecordDetail({ record, unitLabel, onBack, onDelete, onEdit }) {
   return (
     <div className="max-w-2xl">
       <button onClick={onBack} className="text-[#5C6470] flex items-center gap-1 mb-6 hover:text-[#14213D] text-sm">
@@ -716,10 +832,11 @@ function RecordDetail({ record, onBack, onDelete }) {
         </div>
 
         <h2 className="font-serif text-2xl text-[#14213D] mb-1">Sacrament Meeting Minutes</h2>
-        <p className="text-[#5C6470] mb-6 text-sm">{record.meetingDate}</p>
+        <p className="text-[#5C6470] mb-6 text-sm">{record.meetingDate}{unitLabel ? ` · ${unitLabel}` : ""}</p>
 
         <DetailRow label="Presiding" value={record.presiding} />
         <DetailRow label="Conducting" value={record.conducting} />
+        <DetailRow label="Acknowledgments" value={record.acknowledgments} />
         <DetailRow label="Attendance" value={record.attendance} />
 
         <Divider />
@@ -758,9 +875,233 @@ function RecordDetail({ record, onBack, onDelete }) {
         <p className="text-xs text-[#5C6470]">Recorded by {record.createdBy}</p>
       </div>
 
-      <button onClick={() => onDelete(record.id)} className="mt-4 text-[#B0473C] hover:text-[#8a3830] flex items-center gap-1 text-sm">
-        <Trash2 className="w-3.5 h-3.5" /> Delete record
+      <div className="mt-4 flex gap-4">
+        <button onClick={onEdit} className="text-[#B08D57] hover:text-[#8f7145] flex items-center gap-1 text-sm font-medium">
+          <FileText className="w-3.5 h-3.5" /> Edit record
+        </button>
+        <button onClick={() => onDelete(record.id)} className="text-[#B0473C] hover:text-[#8a3830] flex items-center gap-1 text-sm">
+          <Trash2 className="w-3.5 h-3.5" /> Delete record
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDeleteButton({ label, onConfirm }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  if (confirming) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-[#8a3830]">Delete?</span>
+        <button
+          disabled={busy}
+          onClick={async () => { setBusy(true); await onConfirm(); setBusy(false); setConfirming(false); }}
+          className="text-xs bg-[#B0473C] text-white px-3 py-1.5 rounded-sm disabled:opacity-60"
+        >
+          Yes, delete
+        </button>
+        <button onClick={() => setConfirming(false)} className="text-xs text-[#5C6470] px-2">Cancel</button>
+      </div>
+    );
+  }
+  return (
+    <button onClick={() => setConfirming(true)} className="text-xs text-[#B0473C] hover:text-[#8a3830] flex items-center gap-1">
+      <Trash2 className="w-3.5 h-3.5" /> {label}
+    </button>
+  );
+}
+
+function ManageView({ token, isAdmin, currentUserId, onBack }) {
+  const [stakes, setStakes] = useState([]);
+  const [units, setUnits] = useState([]);
+  const [profiles, setProfiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const calls = [
+        sbRest("profiles?select=*,units(name),stakes(name)&order=full_name", { token }),
+      ];
+      if (isAdmin) {
+        calls.push(sbRest("stakes?select=*&order=name", { token }));
+        calls.push(sbRest("units?select=*,stakes(name)&order=name", { token }));
+      }
+      const results = await Promise.all(calls);
+      setProfiles(results[0]);
+      if (isAdmin) {
+        setStakes(results[1]);
+        setUnits(results[2]);
+      }
+    } catch (e) {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  }, [token, isAdmin]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function deleteRow(table, id) {
+    await sbRest(`${table}?id=eq.${id}`, { method: "DELETE", token });
+    await load();
+  }
+
+  return (
+    <div className="max-w-2xl">
+      <button onClick={onBack} className="text-[#5C6470] flex items-center gap-1 mb-6 hover:text-[#14213D] text-sm">
+        <ChevronLeft className="w-4 h-4" /> Back to index
       </button>
+
+      <h2 className="font-serif text-2xl text-[#14213D] mb-2 flex items-center gap-2">
+        <Settings className="w-5 h-5 text-[#B08D57]" /> Manage
+      </h2>
+      <p className="text-[#5C6470] text-sm mb-6">
+        {isAdmin ? "Delete stakes, units, or user access." : "Remove user access within your stake."}
+      </p>
+
+      {loading && <Loader2 className="w-4 h-4 animate-spin text-[#5C6470]" />}
+
+      {!loading && isAdmin && (
+        <Section title="Stakes">
+          {stakes.length === 0 && <p className="text-sm text-[#5C6470] italic">No stakes.</p>}
+          {stakes.map((s) => (
+            <div key={s.id} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+              <span className="text-sm text-[#232323]">{s.name} {s.status !== "approved" && <span className="text-xs text-[#B08D57]">({s.status})</span>}</span>
+              <ConfirmDeleteButton label="Delete stake" onConfirm={() => deleteRow("stakes", s.id)} />
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {!loading && isAdmin && (
+        <Section title="Units">
+          {units.length === 0 && <p className="text-sm text-[#5C6470] italic">No units.</p>}
+          {units.map((u) => (
+            <div key={u.id} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+              <span className="text-sm text-[#232323]">
+                {u.name} {u.abbreviation ? `(${u.abbreviation})` : ""} <span className="text-[#5C6470]">— {u.stakes?.name}</span>
+                {u.status !== "approved" && <span className="text-xs text-[#B08D57]"> ({u.status})</span>}
+              </span>
+              <ConfirmDeleteButton label="Delete unit" onConfirm={() => deleteRow("units", u.id)} />
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {!loading && (
+        <Section title="Users">
+          {profiles.length === 0 && <p className="text-sm text-[#5C6470] italic">No users visible.</p>}
+          {profiles.map((p) => (
+            <div key={p.id} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+              <span className="text-sm text-[#232323]">
+                {p.full_name} <span className="text-[#5C6470]">— {p.role}{p.units?.name ? ` · ${p.units.name}` : ""}{p.stakes?.name ? ` · ${p.stakes.name}` : ""}</span>
+              </span>
+              {p.id !== currentUserId ? (
+                <ConfirmDeleteButton label="Remove access" onConfirm={() => deleteRow("profiles", p.id)} />
+              ) : (
+                <span className="text-xs text-[#5C6470] italic">You</span>
+              )}
+            </div>
+          ))}
+        </Section>
+      )}
+    </div>
+  );
+}
+
+function ApprovalsView({ token, onBack }) {
+  const [pendingStakes, setPendingStakes] = useState([]);
+  const [pendingUnits, setPendingUnits] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [stakesRows, unitsRows] = await Promise.all([
+        sbRest("stakes?status=eq.pending&select=*&order=created_at", { token }),
+        sbRest("units?status=eq.pending&select=*,stakes(name)&order=created_at", { token }),
+      ]);
+      setPendingStakes(stakesRows);
+      setPendingUnits(unitsRows);
+    } catch (e) {
+      // ignore, show empty state
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function updateStatus(table, id, status) {
+    setBusyId(`${table}-${id}`);
+    try {
+      await sbRest(`${table}?id=eq.${id}`, { method: "PATCH", token, body: { status } });
+      await load();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div className="max-w-2xl">
+      <button onClick={onBack} className="text-[#5C6470] flex items-center gap-1 mb-6 hover:text-[#14213D] text-sm">
+        <ChevronLeft className="w-4 h-4" /> Back to index
+      </button>
+
+      <h2 className="font-serif text-2xl text-[#14213D] mb-2 flex items-center gap-2">
+        <ShieldCheck className="w-5 h-5 text-[#B08D57]" /> Pending Approvals
+      </h2>
+      <p className="text-[#5C6470] text-sm mb-6">New stakes and units requested by users, waiting for your review.</p>
+
+      {loading && <Loader2 className="w-4 h-4 animate-spin text-[#5C6470]" />}
+
+      {!loading && pendingStakes.length === 0 && pendingUnits.length === 0 && (
+        <p className="text-[#5C6470] text-sm italic">Nothing pending right now.</p>
+      )}
+
+      {pendingStakes.length > 0 && (
+        <Section title="New Stakes">
+          {pendingStakes.map((s) => (
+            <div key={s.id} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+              <span className="text-sm text-[#232323]">{s.name}</span>
+              <div className="flex gap-2">
+                <button disabled={busyId === `stakes-${s.id}`} onClick={() => updateStatus("stakes", s.id, "approved")} className="text-xs bg-[#3F6B4F] text-white px-3 py-1.5 rounded-sm flex items-center gap-1 disabled:opacity-60">
+                  <Check className="w-3 h-3" /> Approve
+                </button>
+                <button disabled={busyId === `stakes-${s.id}`} onClick={() => updateStatus("stakes", s.id, "rejected")} className="text-xs bg-transparent border border-[#D8D3C7] text-[#5C6470] px-3 py-1.5 rounded-sm">
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {pendingUnits.length > 0 && (
+        <Section title="New Units">
+          {pendingUnits.map((u) => (
+            <div key={u.id} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+              <span className="text-sm text-[#232323]">{u.name} <span className="text-[#5C6470]">— {u.stakes?.name}</span></span>
+              <div className="flex gap-2">
+                <button disabled={busyId === `units-${u.id}`} onClick={() => updateStatus("units", u.id, "approved")} className="text-xs bg-[#3F6B4F] text-white px-3 py-1.5 rounded-sm flex items-center gap-1 disabled:opacity-60">
+                  <Check className="w-3 h-3" /> Approve
+                </button>
+                <button disabled={busyId === `units-${u.id}`} onClick={() => updateStatus("units", u.id, "rejected")} className="text-xs bg-transparent border border-[#D8D3C7] text-[#5C6470] px-3 py-1.5 rounded-sm">
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))}
+        </Section>
+      )}
     </div>
   );
 }
