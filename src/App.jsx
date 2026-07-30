@@ -11,7 +11,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const CONFIGURED = !SUPABASE_URL.includes("YOUR-PROJECT");
 
-const ROLES = ["Secretary", "Bishopric", "Admin", "Stake Admin"];
+const ROLES = ["Bishopric", "Stake Admin"];
 const NEW_STAKE_VALUE = "__new_stake__";
 const NEW_UNIT_VALUE = "__new_unit__";
 
@@ -145,6 +145,7 @@ export default function App() {
   const [unitsById, setUnitsById] = useState({});
   const [speakerRows, setSpeakerRows] = useState([]);
   const [loadingSpeakers, setLoadingSpeakers] = useState(false);
+  const [hymns, setHymns] = useState([]);
   const [view, setView] = useState("list");
   const [draft, setDraft] = useState(emptyRecord());
   const [editingId, setEditingId] = useState(null);
@@ -202,6 +203,7 @@ export default function App() {
     if (session) {
       loadRecords(session.token);
       loadSpeakerHistory(session.token);
+      sbRest("hymns?select=number,title&order=number", { token: session.token }).then(setHymns).catch(() => {});
     }
   }, [session, loadRecords, loadSpeakerHistory]);
 
@@ -226,17 +228,17 @@ export default function App() {
 
       let unitName = "All units";
       let stakeName = "";
-      let pending = false;
+      let pending = p.status !== "approved";
       if (p.unit_id) {
         const unitRows = await sbRest(`units?id=eq.${p.unit_id}&select=*,stakes(name)`, { token: data.access_token });
         const unit = unitRows[0] || {};
         unitName = unit.name || "";
         stakeName = unit.stakes?.name || "";
-        pending = unit.status !== "approved";
+        pending = pending || unit.status !== "approved";
       } else if (p.stake_id) {
         const stakeRows = await sbRest(`stakes?id=eq.${p.stake_id}&select=*`, { token: data.access_token });
         stakeName = stakeRows[0]?.name || "";
-        pending = stakeRows[0]?.status !== "approved";
+        pending = pending || stakeRows[0]?.status !== "approved";
       }
 
       const isAdmin = await checkIsAdmin(data.access_token, data.user.id);
@@ -245,7 +247,7 @@ export default function App() {
         token: data.access_token,
         userId: data.user.id,
         name: p.full_name || authEmail,
-        role: p.role || "Secretary",
+        role: p.role || "Bishopric",
         unitId: p.unit_id,
         unitName,
         stakeName,
@@ -313,7 +315,7 @@ export default function App() {
       await sbRest("profiles", {
         method: "POST",
         token,
-        body: { id: data.user.id, full_name: authName, role: authRole, unit_id: unitId, stake_id: isStakeAdmin ? stakeId : null },
+        body: { id: data.user.id, full_name: authName, role: authRole, unit_id: unitId, stake_id: isStakeAdmin ? stakeId : null, status: "pending" },
       });
 
       const isAdmin = await checkIsAdmin(token, data.user.id);
@@ -326,7 +328,7 @@ export default function App() {
         unitId,
         unitName: isStakeAdmin ? "All units" : (usingNewUnit ? newUnitName.trim() : units.find((u) => String(u.id) === String(unitId))?.name || ""),
         stakeName: usingNewStake ? newStakeName.trim() : stakes.find((s) => String(s.id) === String(stakeId))?.name || "",
-        pending: isStakeAdmin ? stakePending : (unitPending || stakePending),
+        pending: true,
         isAdmin,
       });
     } catch (e) {
@@ -613,7 +615,7 @@ export default function App() {
           </div>
         )}
 
-        {view === "detail" && selected && <RecordDetail record={selected} unitLabel={unitsById[selected.unitId] ? (unitsById[selected.unitId].abbreviation || unitsById[selected.unitId].name) : null} onBack={() => setView("list")} onDelete={deleteRecord} onEdit={() => startEdit(selected)} />}
+        {view === "detail" && selected && <RecordDetail record={selected} unitLabel={unitsById[selected.unitId] ? (unitsById[selected.unitId].abbreviation || unitsById[selected.unitId].name) : null} role={session.role} onBack={() => setView("list")} onDelete={deleteRecord} onEdit={() => startEdit(selected)} />}
 
         {view === "speakers" && <SpeakersView rows={speakerRows} loading={loadingSpeakers} onBack={() => setView("list")} />}
 
@@ -633,6 +635,7 @@ export default function App() {
             saving={saving}
             isEditing={!!editingId}
             speakerNames={speakerNameOptions}
+            hymns={hymns}
           />
         )}
       </main>
@@ -651,13 +654,16 @@ function Field({ label, children }) {
 
 const inputClass = "w-full border border-[#D8D3C7] rounded-sm px-3 py-2 bg-white text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#B08D57] focus:border-transparent text-sm";
 
-function MinutesForm({ draft, updateField, updateListItem, addListItem, removeListItem, onCancel, onSave, saving, isEditing, speakerNames }) {
+function MinutesForm({ draft, updateField, updateListItem, addListItem, removeListItem, onCancel, onSave, saving, isEditing, speakerNames, hymns }) {
   return (
     <form onSubmit={onSave} className="max-w-3xl">
       <h2 className="font-serif text-2xl text-[#14213D] mb-6">{isEditing ? "Edit Sacrament Meeting Minutes" : "New Sacrament Meeting Minutes"}</h2>
 
       <datalist id="speaker-names-list">
         {speakerNames.map((n) => <option key={n} value={n} />)}
+      </datalist>
+      <datalist id="hymn-options-list">
+        {hymns.map((h) => <option key={h.number} value={`${h.number} - ${h.title}`} />)}
       </datalist>
 
       <Section title="General">
@@ -682,7 +688,7 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
 
       <Section title="Opening">
         <div className="grid sm:grid-cols-2 gap-x-4">
-          <Field label="Opening Hymn"><input value={draft.openingHymn} onChange={(e) => updateField("openingHymn", e.target.value)} className={inputClass} /></Field>
+          <Field label="Opening Hymn"><input value={draft.openingHymn} onChange={(e) => updateField("openingHymn", e.target.value)} list="hymn-options-list" className={inputClass} /></Field>
           <Field label="Opening Prayer"><input value={draft.openingPrayer} onChange={(e) => updateField("openingPrayer", e.target.value)} className={inputClass} /></Field>
         </div>
       </Section>
@@ -730,7 +736,7 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
       </RepeatingSection>
 
       <Section title="Sacrament">
-        <Field label="Sacrament Hymn"><input value={draft.sacramentHymn} onChange={(e) => updateField("sacramentHymn", e.target.value)} className={inputClass} /></Field>
+        <Field label="Sacrament Hymn"><input value={draft.sacramentHymn} onChange={(e) => updateField("sacramentHymn", e.target.value)} list="hymn-options-list" className={inputClass} /></Field>
       </Section>
 
       <RepeatingSection
@@ -747,7 +753,7 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
       />
 
       <Section title="Intermediate Hymn">
-        <Field label="Intermediate Hymn"><input value={draft.intermediateHymn} onChange={(e) => updateField("intermediateHymn", e.target.value)} className={inputClass} /></Field>
+        <Field label="Intermediate Hymn"><input value={draft.intermediateHymn} onChange={(e) => updateField("intermediateHymn", e.target.value)} list="hymn-options-list" className={inputClass} /></Field>
       </Section>
 
       <RepeatingSection
@@ -765,7 +771,7 @@ function MinutesForm({ draft, updateField, updateListItem, addListItem, removeLi
 
       <Section title="Closing">
         <div className="grid sm:grid-cols-2 gap-x-4">
-          <Field label="Closing Hymn"><input value={draft.closingHymn} onChange={(e) => updateField("closingHymn", e.target.value)} className={inputClass} /></Field>
+          <Field label="Closing Hymn"><input value={draft.closingHymn} onChange={(e) => updateField("closingHymn", e.target.value)} list="hymn-options-list" className={inputClass} /></Field>
           <Field label="Closing Prayer"><input value={draft.closingPrayer} onChange={(e) => updateField("closingPrayer", e.target.value)} className={inputClass} /></Field>
         </div>
       </Section>
@@ -818,7 +824,8 @@ function RepeatingSection({ title, items, onAdd, onRemove, renderItem, children 
   );
 }
 
-function RecordDetail({ record, unitLabel, onBack, onDelete, onEdit }) {
+function RecordDetail({ record, unitLabel, role, onBack, onDelete, onEdit }) {
+  const canEdit = role !== "Stake Admin";
   return (
     <div className="max-w-2xl">
       <button onClick={onBack} className="text-[#5C6470] flex items-center gap-1 mb-6 hover:text-[#14213D] text-sm">
@@ -840,7 +847,8 @@ function RecordDetail({ record, unitLabel, onBack, onDelete, onEdit }) {
         <DetailRow label="Attendance" value={record.attendance} />
 
         <Divider />
-        <DetailRow label="Opening Hymn / Prayer" value={`${record.openingHymn || ""} / ${record.openingPrayer || ""}`} />
+        <DetailRow label="Opening Hymn" value={record.openingHymn} />
+        <DetailRow label="Opening Prayer" value={record.openingPrayer} />
 
         {record.announcements && (<><Divider /><p className="text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-2">Announcements</p><p className="text-sm text-[#232323]">{record.announcements}</p></>)}
 
@@ -850,6 +858,11 @@ function RecordDetail({ record, unitLabel, onBack, onDelete, onEdit }) {
 
         {record.callings.length > 0 && (<><Divider /><p className="text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-2">Callings Sustained / Released</p>
           {record.callings.map((c, i) => <p key={i} className="text-sm text-[#232323] mb-1">{c.name} — {c.calling} ({c.action})</p>)}
+          <div className="bg-[#EFEBE1] border border-[#D8D3C7] rounded-sm p-4 mt-3 text-sm text-[#5C6470]">
+            <p className="font-mono text-xs uppercase tracking-wider text-[#5C6470] mb-2">Suggested script</p>
+            <p className="mb-1.5"><strong>Sustaining:</strong> "It is proposed that we sustain [name] as [calling]. All in favor, please manifest it. Those opposed, if any, may manifest it by the same sign."</p>
+            <p><strong>Releasing:</strong> "It is proposed that we release [name] as [calling], with a vote of thanks for the service rendered. All in favor, please manifest it."</p>
+          </div>
         </>)}
 
         <Divider />
@@ -867,7 +880,8 @@ function RecordDetail({ record, unitLabel, onBack, onDelete, onEdit }) {
         </>)}
 
         <Divider />
-        <DetailRow label="Closing Hymn / Prayer" value={`${record.closingHymn || ""} / ${record.closingPrayer || ""}`} />
+        <DetailRow label="Closing Hymn" value={record.closingHymn} />
+        <DetailRow label="Closing Prayer" value={record.closingPrayer} />
 
         {record.notes && (<><Divider /><p className="text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-2">Notes</p><p className="text-sm text-[#232323]">{record.notes}</p></>)}
 
@@ -876,12 +890,16 @@ function RecordDetail({ record, unitLabel, onBack, onDelete, onEdit }) {
       </div>
 
       <div className="mt-4 flex gap-4">
-        <button onClick={onEdit} className="text-[#B08D57] hover:text-[#8f7145] flex items-center gap-1 text-sm font-medium">
-          <FileText className="w-3.5 h-3.5" /> Edit record
-        </button>
-        <button onClick={() => onDelete(record.id)} className="text-[#B0473C] hover:text-[#8a3830] flex items-center gap-1 text-sm">
-          <Trash2 className="w-3.5 h-3.5" /> Delete record
-        </button>
+        {canEdit && (
+          <>
+            <button onClick={onEdit} className="text-[#B08D57] hover:text-[#8f7145] flex items-center gap-1 text-sm font-medium">
+              <FileText className="w-3.5 h-3.5" /> Edit record
+            </button>
+            <button onClick={() => onDelete(record.id)} className="text-[#B0473C] hover:text-[#8a3830] flex items-center gap-1 text-sm">
+              <Trash2 className="w-3.5 h-3.5" /> Delete record
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1017,18 +1035,21 @@ function ManageView({ token, isAdmin, currentUserId, onBack }) {
 function ApprovalsView({ token, onBack }) {
   const [pendingStakes, setPendingStakes] = useState([]);
   const [pendingUnits, setPendingUnits] = useState([]);
+  const [pendingProfiles, setPendingProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [stakesRows, unitsRows] = await Promise.all([
+      const [stakesRows, unitsRows, profileRows] = await Promise.all([
         sbRest("stakes?status=eq.pending&select=*&order=created_at", { token }),
         sbRest("units?status=eq.pending&select=*,stakes(name)&order=created_at", { token }),
+        sbRest("profiles?status=eq.pending&select=*,units(name),stakes(name)&order=created_at", { token }),
       ]);
       setPendingStakes(stakesRows);
       setPendingUnits(unitsRows);
+      setPendingProfiles(profileRows);
     } catch (e) {
       // ignore, show empty state
     } finally {
@@ -1063,8 +1084,28 @@ function ApprovalsView({ token, onBack }) {
 
       {loading && <Loader2 className="w-4 h-4 animate-spin text-[#5C6470]" />}
 
-      {!loading && pendingStakes.length === 0 && pendingUnits.length === 0 && (
+      {!loading && pendingStakes.length === 0 && pendingUnits.length === 0 && pendingProfiles.length === 0 && (
         <p className="text-[#5C6470] text-sm italic">Nothing pending right now.</p>
+      )}
+
+      {pendingProfiles.length > 0 && (
+        <Section title="New Users">
+          {pendingProfiles.map((p) => (
+            <div key={p.id} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+              <span className="text-sm text-[#232323]">
+                {p.full_name} <span className="text-[#5C6470]">— {p.role}{p.units?.name ? ` · ${p.units.name}` : ""}{p.stakes?.name ? ` · ${p.stakes.name}` : ""}</span>
+              </span>
+              <div className="flex gap-2">
+                <button disabled={busyId === `profiles-${p.id}`} onClick={() => updateStatus("profiles", p.id, "approved")} className="text-xs bg-[#3F6B4F] text-white px-3 py-1.5 rounded-sm flex items-center gap-1 disabled:opacity-60">
+                  <Check className="w-3 h-3" /> Approve
+                </button>
+                <button disabled={busyId === `profiles-${p.id}`} onClick={() => updateStatus("profiles", p.id, "rejected")} className="text-xs bg-transparent border border-[#D8D3C7] text-[#5C6470] px-3 py-1.5 rounded-sm">
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))}
+        </Section>
       )}
 
       {pendingStakes.length > 0 && (
