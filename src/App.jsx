@@ -202,13 +202,22 @@ export default function App() {
     }
   }, []);
 
+  const loadHymns = useCallback(async (token) => {
+    try {
+      const rows = await sbRest("hymns?select=number,title&order=number", { token });
+      setHymns(rows);
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
   useEffect(() => {
     if (session) {
       loadRecords(session.token);
       loadSpeakerHistory(session.token);
-      sbRest("hymns?select=number,title&order=number", { token: session.token }).then(setHymns).catch(() => {});
+      loadHymns(session.token);
     }
-  }, [session, loadRecords, loadSpeakerHistory]);
+  }, [session, loadRecords, loadSpeakerHistory, loadHymns]);
 
   async function checkIsAdmin(token, userId) {
     try {
@@ -739,7 +748,7 @@ export default function App() {
 
         {view === "approvals" && <ApprovalsView token={session.token} onBack={() => setView("list")} />}
 
-        {view === "manage" && <ManageView token={session.token} isAdmin={session.isAdmin} currentUserId={session.userId} onBack={() => setView("list")} />}
+        {view === "manage" && <ManageView token={session.token} isAdmin={session.isAdmin} currentUserId={session.userId} hymns={hymns} onReloadHymns={() => loadHymns(session.token)} onBack={() => setView("list")} />}
 
         {view === "form" && (
           <MinutesForm
@@ -1049,11 +1058,16 @@ function ConfirmDeleteButton({ label, onConfirm }) {
   );
 }
 
-function ManageView({ token, isAdmin, currentUserId, onBack }) {
+function ManageView({ token, isAdmin, currentUserId, hymns, onReloadHymns, onBack }) {
   const [stakes, setStakes] = useState([]);
   const [units, setUnits] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [newHymnNumber, setNewHymnNumber] = useState("");
+  const [newHymnTitle, setNewHymnTitle] = useState("");
+  const [hymnError, setHymnError] = useState("");
+  const [hymnSaving, setHymnSaving] = useState(false);
+  const [hymnSearch, setHymnSearch] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1087,6 +1101,33 @@ function ManageView({ token, isAdmin, currentUserId, onBack }) {
     await load();
   }
 
+  async function addHymn(e) {
+    e.preventDefault();
+    setHymnError("");
+    const num = Number(newHymnNumber);
+    if (!num || !newHymnTitle.trim()) return setHymnError("Enter both a number and a title.");
+    setHymnSaving(true);
+    try {
+      await sbRest("hymns", { method: "POST", token, body: { number: num, title: newHymnTitle.trim() } });
+      setNewHymnNumber("");
+      setNewHymnTitle("");
+      await onReloadHymns();
+    } catch (err) {
+      setHymnError(err.message);
+    } finally {
+      setHymnSaving(false);
+    }
+  }
+
+  async function deleteHymn(number) {
+    await sbRest(`hymns?number=eq.${number}`, { method: "DELETE", token });
+    await onReloadHymns();
+  }
+
+  const filteredHymns = hymnSearch.trim()
+    ? hymns.filter((h) => String(h.number).includes(hymnSearch.trim()) || h.title.toLowerCase().includes(hymnSearch.trim().toLowerCase())).slice(0, 20)
+    : [];
+
   return (
     <div className="max-w-2xl">
       <button onClick={onBack} className="text-[#5C6470] flex items-center gap-1 mb-6 hover:text-[#14213D] text-sm">
@@ -1101,6 +1142,37 @@ function ManageView({ token, isAdmin, currentUserId, onBack }) {
       </p>
 
       {loading && <Loader2 className="w-4 h-4 animate-spin text-[#5C6470]" />}
+
+      {!loading && isAdmin && (
+        <Section title="Hymns">
+          <p className="text-xs text-[#5C6470] mb-3">
+            Add hymns released individually ahead of the full new hymnal — they'll show up in the hymn autocomplete right away.
+          </p>
+          <form onSubmit={addHymn} className="flex gap-2 items-end mb-4">
+            <div className="w-24">
+              <label className="block text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-1.5">Number</label>
+              <input type="number" value={newHymnNumber} onChange={(e) => setNewHymnNumber(e.target.value)} className={inputClass} />
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-1.5">Title</label>
+              <input value={newHymnTitle} onChange={(e) => setNewHymnTitle(e.target.value)} className={inputClass} placeholder="e.g. Christ Is Alive" />
+            </div>
+            <button type="submit" disabled={hymnSaving} className="bg-[#14213D] text-[#FAF8F3] rounded-sm px-4 py-2 text-sm font-medium disabled:opacity-60">
+              {hymnSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Add"}
+            </button>
+          </form>
+          {hymnError && <p className="text-[#B0473C] text-xs mb-3">{hymnError}</p>}
+
+          <label className="block text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-1.5">Search to remove a hymn</label>
+          <input value={hymnSearch} onChange={(e) => setHymnSearch(e.target.value)} className={inputClass} placeholder="Type a number or title…" />
+          {filteredHymns.map((h) => (
+            <div key={h.number} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0 mt-2">
+              <span className="text-sm text-[#232323]">{h.number} — {h.title}</span>
+              <ConfirmDeleteButton label="Delete" onConfirm={() => deleteHymn(h.number)} />
+            </div>
+          ))}
+        </Section>
+      )}
 
       {!loading && isAdmin && (
         <Section title="Stakes">
