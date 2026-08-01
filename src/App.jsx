@@ -1063,6 +1063,48 @@ function ConfirmDeleteButton({ label, onConfirm }) {
   );
 }
 
+function EditableUnitRow({ unit, token, onSaved, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(unit.name);
+  const [abbr, setAbbr] = useState(unit.abbreviation || "");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await sbRest(`units?id=eq.${unit.id}`, { method: "PATCH", token, body: { name: name.trim(), abbreviation: abbr.trim() || null } });
+      setEditing(false);
+      await onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-2 py-2 border-b border-[#E3DECF] last:border-0">
+        <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass + " flex-1"} placeholder="Unit name" />
+        <input value={abbr} onChange={(e) => setAbbr(e.target.value)} className={inputClass + " w-32"} placeholder="Abbreviation" maxLength={12} />
+        <button disabled={saving} onClick={save} className="text-xs bg-[#3F6B4F] text-white px-3 py-1.5 rounded-sm disabled:opacity-60">Save</button>
+        <button onClick={() => setEditing(false)} className="text-xs text-[#5C6470] px-2">Cancel</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+      <span className="text-sm text-[#232323]">
+        {unit.name} {unit.abbreviation ? `(${unit.abbreviation})` : ""} <span className="text-[#5C6470]">— {unit.stakes?.name}</span>
+        {unit.status !== "approved" && <span className="text-xs text-[#B08D57]"> ({unit.status})</span>}
+      </span>
+      <div className="flex gap-3 items-center">
+        <button onClick={() => setEditing(true)} className="text-xs text-[#B08D57] hover:text-[#8f7145]">Edit</button>
+        <ConfirmDeleteButton label="Delete unit" onConfirm={onDelete} />
+      </div>
+    </div>
+  );
+}
+
 function ManageView({ token, isAdmin, currentUserId, hymns, onReloadHymns, onBack }) {
   const [stakes, setStakes] = useState([]);
   const [units, setUnits] = useState([]);
@@ -1195,13 +1237,7 @@ function ManageView({ token, isAdmin, currentUserId, hymns, onReloadHymns, onBac
         <Section title="Units">
           {units.length === 0 && <p className="text-sm text-[#5C6470] italic">No units.</p>}
           {units.map((u) => (
-            <div key={u.id} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
-              <span className="text-sm text-[#232323]">
-                {u.name} {u.abbreviation ? `(${u.abbreviation})` : ""} <span className="text-[#5C6470]">— {u.stakes?.name}</span>
-                {u.status !== "approved" && <span className="text-xs text-[#B08D57]"> ({u.status})</span>}
-              </span>
-              <ConfirmDeleteButton label="Delete unit" onConfirm={() => deleteRow("units", u.id)} />
-            </div>
+            <EditableUnitRow key={u.id} unit={u} token={token} onSaved={load} onDelete={() => deleteRow("units", u.id)} />
           ))}
         </Section>
       )}
