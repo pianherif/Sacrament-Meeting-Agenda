@@ -782,8 +782,13 @@ function Field({ label, children }) {
 const inputClass = "w-full border border-[#D8D3C7] rounded-sm px-3 py-2 bg-white text-[#232323] focus:outline-none focus:ring-2 focus:ring-[#B08D57] focus:border-transparent text-sm";
 
 function MinutesForm({ draft, updateField, updateListItem, addListItem, removeListItem, onCancel, onSave, saving, isEditing, speakerNames, hymns }) {
+  function preventEnterSubmit(e) {
+    if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") {
+      e.preventDefault();
+    }
+  }
   return (
-    <form onSubmit={onSave} className="max-w-3xl">
+    <form onSubmit={onSave} onKeyDown={preventEnterSubmit} className="max-w-3xl">
       <h2 className="font-serif text-2xl text-[#14213D] mb-6">{isEditing ? "Edit Sacrament Meeting Minutes" : "New Sacrament Meeting Minutes"}</h2>
 
       <datalist id="speaker-names-list">
