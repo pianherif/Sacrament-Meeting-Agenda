@@ -1089,8 +1089,12 @@ function EditableHymnRow({ hymn, token, onSaved, onDelete }) {
     return (
       <div className="py-2 border-b border-[#E3DECF] last:border-0">
         <div className="flex items-center gap-2">
-          <input type="number" value={number} onChange={(e) => setNumber(e.target.value)} className={inputClass + " w-20"} />
-          <input value={title} onChange={(e) => setTitle(e.target.value)} className={inputClass + " flex-1"} />
+          <div className="w-20">
+            <input type="number" value={number} onChange={(e) => setNumber(e.target.value)} className={inputClass} />
+          </div>
+          <div className="flex-1">
+            <input value={title} onChange={(e) => setTitle(e.target.value)} className={inputClass} />
+          </div>
           <button disabled={saving} onClick={save} className="text-xs bg-[#3F6B4F] text-white px-3 py-1.5 rounded-sm disabled:opacity-60">Save</button>
           <button onClick={() => setEditing(false)} className="text-xs text-[#5C6470] px-2">Cancel</button>
         </div>
@@ -1130,8 +1134,12 @@ function EditableUnitRow({ unit, token, onSaved, onDelete }) {
   if (editing) {
     return (
       <div className="flex items-center gap-2 py-2 border-b border-[#E3DECF] last:border-0">
-        <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass + " flex-1"} placeholder="Unit name" />
-        <input value={abbr} onChange={(e) => setAbbr(e.target.value)} className={inputClass + " w-32"} placeholder="Abbreviation" maxLength={12} />
+        <div className="flex-1">
+          <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} placeholder="Unit name" />
+        </div>
+        <div className="w-32">
+          <input value={abbr} onChange={(e) => setAbbr(e.target.value)} className={inputClass} placeholder="Abbreviation" maxLength={12} />
+        </div>
         <button disabled={saving} onClick={save} className="text-xs bg-[#3F6B4F] text-white px-3 py-1.5 rounded-sm disabled:opacity-60">Save</button>
         <button onClick={() => setEditing(false)} className="text-xs text-[#5C6470] px-2">Cancel</button>
       </div>
