@@ -204,7 +204,7 @@ export default function App() {
 
   const loadHymns = useCallback(async (token) => {
     try {
-      const rows = await sbRest("hymns?select=number,title&order=number", { token });
+      const rows = await sbRest("hymns?select=id,number,title&order=number", { token });
       setHymns(rows);
     } catch (e) {
       // ignore
@@ -1063,6 +1063,53 @@ function ConfirmDeleteButton({ label, onConfirm }) {
   );
 }
 
+function EditableHymnRow({ hymn, token, onSaved, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [number, setNumber] = useState(hymn.number);
+  const [title, setTitle] = useState(hymn.title);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save() {
+    setError("");
+    if (!Number(number) || !title.trim()) return setError("Enter both a number and a title.");
+    setSaving(true);
+    try {
+      await sbRest(`hymns?id=eq.${hymn.id}`, { method: "PATCH", token, body: { number: Number(number), title: title.trim() } });
+      setEditing(false);
+      await onSaved();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="py-2 border-b border-[#E3DECF] last:border-0">
+        <div className="flex items-center gap-2">
+          <input type="number" value={number} onChange={(e) => setNumber(e.target.value)} className={inputClass + " w-20"} />
+          <input value={title} onChange={(e) => setTitle(e.target.value)} className={inputClass + " flex-1"} />
+          <button disabled={saving} onClick={save} className="text-xs bg-[#3F6B4F] text-white px-3 py-1.5 rounded-sm disabled:opacity-60">Save</button>
+          <button onClick={() => setEditing(false)} className="text-xs text-[#5C6470] px-2">Cancel</button>
+        </div>
+        {error && <p className="text-[#B0473C] text-xs mt-1.5">{error}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0">
+      <span className="text-sm text-[#232323]">{hymn.number} — {hymn.title}</span>
+      <div className="flex gap-3 items-center">
+        <button onClick={() => setEditing(true)} className="text-xs text-[#B08D57] hover:text-[#8f7145]">Edit</button>
+        <ConfirmDeleteButton label="Delete" onConfirm={onDelete} />
+      </div>
+    </div>
+  );
+}
+
 function EditableUnitRow({ unit, token, onSaved, onDelete }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(unit.name);
@@ -1210,14 +1257,13 @@ function ManageView({ token, isAdmin, currentUserId, hymns, onReloadHymns, onBac
           </form>
           {hymnError && <p className="text-[#B0473C] text-xs mb-3">{hymnError}</p>}
 
-          <label className="block text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-1.5">Search to remove a hymn</label>
+          <label className="block text-xs font-mono uppercase tracking-wider text-[#5C6470] mb-1.5">Search to edit or remove a hymn</label>
           <input value={hymnSearch} onChange={(e) => setHymnSearch(e.target.value)} className={inputClass} placeholder="Type a number or title…" />
-          {filteredHymns.map((h) => (
-            <div key={h.number} className="flex items-center justify-between py-2 border-b border-[#E3DECF] last:border-0 mt-2">
-              <span className="text-sm text-[#232323]">{h.number} — {h.title}</span>
-              <ConfirmDeleteButton label="Delete" onConfirm={() => deleteHymn(h.number)} />
-            </div>
-          ))}
+          <div className="mt-2">
+            {filteredHymns.map((h) => (
+              <EditableHymnRow key={h.id} hymn={h} token={token} onSaved={onReloadHymns} onDelete={() => deleteHymn(h.number)} />
+            ))}
+          </div>
         </Section>
       )}
 
